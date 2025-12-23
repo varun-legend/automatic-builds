@@ -1,6 +1,10 @@
 name: 🚀 Cross-Repo Android Release Pipeline (Zonic)
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
     inputs:
       bump:
@@ -65,7 +69,7 @@ jobs:
           printf 'RELEASE_STORE_PASSWORD=%s\n' "${{ secrets.RELEASE_STORE_PASSWORD }}" >> source/gradle.properties
           printf 'RELEASE_KEY_PASSWORD=%s\n' "${{ secrets.RELEASE_KEY_PASSWORD }}" >> source/gradle.properties
 
-      - name: 🔍 Bump version (fast, shell) 
+      - name: 🔍 Bump version (fast, shell)
         id: get-version
         env:
           BUMP: ${{ github.event.inputs.bump }}
@@ -123,24 +127,38 @@ jobs:
           echo "apk_name=$TARGET_NAME" >> $GITHUB_OUTPUT
           echo "apk_path=$TARGET_PATH" >> $GITHUB_OUTPUT
 
-      - name: ⚙️ Install gh CLI
-        uses: cli/gh-action@v2
-        with:
-          token: ${{ secrets.PAT }}
+      - name: ⚙️ Ensure gh CLI and authenticate
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt update -y
+            sudo apt install -y gh
+          fi
+          echo "${GH_TOKEN}" | gh auth login --with-token
 
-      - name: 🧾 Create GitHub Release in source repo & upload APK
+      - name: 🧾 Create or upload GitHub Release in source repo & upload APK
         if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
         id: create_release
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
         run: |
           set -euo pipefail
           TAG="v${{ steps.get-version.outputs.version_name }}"
           TITLE="📦 Release ${TAG}"
           BODY="Release ${TAG} (code ${{ steps.get-version.outputs.version_code }})"
           APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
-          gh release create "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" -t "${TITLE}" -n "${BODY}"
+          if gh release view "$TAG" --repo "${{ env.SOURCE_REPO }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" --clobber
+          else
+            gh release create "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" -t "${TITLE}" -n "${BODY}"
+          fi
 
       - name: 📝 Commit Version Bump back to source repo (push with PAT)
         if: always()
+        env:
+          PAT: ${{ secrets.PAT }}
         run: |
           set -euo pipefail
           cd source
@@ -148,6 +166,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.properties || true
           git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }}" || echo "No version change to commit"
-          # Ensure push uses PAT
-          git remote set-url origin "https://x-access-token:${{ secrets.PAT }}@github.com/${{ env.SOURCE_REPO }}.git"
-          git push origin HEAD:main || echo "Push failed (check PAT permissions or branch name)"
+          git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main || echo "Push failed (check PAT permissions or branch name)"
