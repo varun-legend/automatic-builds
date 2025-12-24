@@ -127,17 +127,14 @@ jobs:
           echo "apk_name=$TARGET_NAME" >> $GITHUB_OUTPUT
           echo "apk_path=$TARGET_PATH" >> $GITHUB_OUTPUT
 
-      - name: ⚙️ Ensure gh CLI and authenticate
-        env:
-          GH_TOKEN: ${{ secrets.PAT }}
+      - name: ⚙️ Ensure gh CLI
         run: |
-          set -euo pipefail
+         set -euo pipefail
           if ! command -v gh >/dev/null 2>&1; then
-            sudo apt update -y
-            sudo apt install -y gh
+           sudo apt update -y
+           sudo apt install -y gh
           fi
-          echo "${GH_TOKEN}" | gh auth login --with-token
-
+          
       - name: 🧾 Create or upload GitHub Release in source repo & upload APK
         if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
         id: create_release
