@@ -1,0 +1,58 @@
+name: 🧠 GitHub Runner System Info
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - runner-info-test
+
+jobs:
+  inspect-runner:
+    name: Inspect Ubuntu Runner
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🖥️ OS & Kernel
+        run: |
+          uname -a
+          cat /etc/os-release
+
+      - name: 🧮 CPU Info
+        run: |
+          lscpu
+
+      - name: 🧠 Memory (RAM)
+        run: |
+          free -h
+          vmstat -s
+
+      - name: 💾 Disk Info
+        run: |
+          df -h
+          lsblk
+
+      - name: 🧱 Ulimits
+        run: |
+          ulimit -a
+
+      - name: 🐳 Docker Info
+        run: |
+          docker --version || echo "Docker not available"
+          docker info || echo "Docker info not accessible"
+
+      - name: 🌍 GitHub Runner Environment
+        run: |
+          echo "Runner name: $RUNNER_NAME"
+          echo "Runner OS: $RUNNER_OS"
+          echo "Runner arch: $RUNNER_ARCH"
+          echo "GitHub workspace: $GITHUB_WORKSPACE"
+          echo "Temp dir: $RUNNER_TEMP"
+          echo "Tool cache: $RUNNER_TOOL_CACHE"
+
+      - name: 📦 Installed Tool Versions
+        run: |
+          java -version || true
+          node --version || true
+          npm --version || true
+          python3 --version || true
+          git --version || true
