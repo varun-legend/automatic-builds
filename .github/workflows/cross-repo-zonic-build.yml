@@ -154,22 +154,22 @@ jobs:
             gh release create "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" -t "${TITLE}" -n "${BODY}"
           fi
           
-      - name: 📦 Create or upload GitHub Release (same repo)
-        if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ steps.get-version.outputs.version_name }}"
-          TITLE="📦 Release ${TAG}"
-          BODY="Release ${TAG} (code ${{ steps.get-version.outputs.version_code }})"
-          APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
+      #- name: 📦 Create or upload GitHub Release (same repo)
+        #if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
+        #env:
+        #  GH_TOKEN: ${{ github.token }}
+        #run: |
+        #  set -euo pipefail
+        #  TAG="v${{ steps.get-version.outputs.version_name }}"
+        #  TITLE="📦 Release ${TAG}"
+        #  BODY="Release ${TAG} (code ${{ steps.get-version.outputs.version_code }})"
+        #  APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK_PATH" --clobber
-          else
-            gh release create "$TAG" "$APK_PATH" -t "$TITLE" -n "$BODY"
-          fi
+        # if gh release view "$TAG" >/dev/null 2>&1; then
+        #  gh release upload "$TAG" "$APK_PATH" --clobber
+        #  else
+        #    gh release create "$TAG" "$APK_PATH" -t "$TITLE" -n "$BODY"
+        #    fi
 
       - name: 📝 Commit Version Bump back to source repo (push with PAT)
         if: always()
