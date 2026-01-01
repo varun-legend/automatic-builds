@@ -181,5 +181,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.properties || true
-          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }}" || echo "No version change to commit"
+          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip ci]" || echo "No version change to commit"
           git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main || echo "Push failed (check PAT permissions or branch name)"
