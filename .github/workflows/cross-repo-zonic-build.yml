@@ -6,7 +6,7 @@ on:
       - main
   pull_request:
   repository_dispatch:
-   types : [zonic]
+    types: [zonic]
   workflow_dispatch:
     inputs:
       bump:
@@ -131,12 +131,12 @@ jobs:
 
       - name: ⚙️ Ensure gh CLI
         run: |
-         set -euo pipefail
+          set -euo pipefail
           if ! command -v gh >/dev/null 2>&1; then
-           sudo apt update -y
-           sudo apt install -y gh
+            sudo apt update -y
+            sudo apt install -y gh
           fi
-          
+
       - name: 🧾 Create or upload GitHub Release in source repo & upload APK
         if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
         id: create_release
@@ -153,23 +153,6 @@ jobs:
           else
             gh release create "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" -t "${TITLE}" -n "${BODY}"
           fi
-          
-      #- name: 📦 Create or upload GitHub Release (same repo)
-        #if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
-        #env:
-        #  GH_TOKEN: ${{ github.token }}
-        #run: |
-        #  set -euo pipefail
-        #  TAG="v${{ steps.get-version.outputs.version_name }}"
-        #  TITLE="📦 Release ${TAG}"
-        #  BODY="Release ${TAG} (code ${{ steps.get-version.outputs.version_code }})"
-        #  APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
-
-        # if gh release view "$TAG" >/dev/null 2>&1; then
-        #  gh release upload "$TAG" "$APK_PATH" --clobber
-        #  else
-        #    gh release create "$TAG" "$APK_PATH" -t "$TITLE" -n "$BODY"
-        #    fi
 
       - name: 📝 Commit Version Bump back to source repo (push with PAT)
         if: always()
@@ -181,5 +164,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.properties || true
-          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip ci]" || echo "No version change to commit"
+          # include a skip marker so external webhooks can ignore this automated commit
+          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip zonic]" || echo "No version change to commit"
           git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main || echo "Push failed (check PAT permissions or branch name)"
