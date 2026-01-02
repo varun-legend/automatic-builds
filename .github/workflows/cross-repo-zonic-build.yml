@@ -151,7 +151,7 @@ jobs:
             sudo apt install -y gh
           fi
 
-      - name: 📝 Commit Version Bump back to source repo (push from source; reclone & retry only on failure)
+            - name: 📝 Commit Version Bump back to source repo (push from source; reclone & retry only on failure)
         if: always()
         env:
           PAT: ${{ secrets.PAT }}
@@ -176,7 +176,7 @@ jobs:
           # commit with skip marker
           git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip zonic]" || true
 
-          # try push directly from 'source'
+          # try push directly from 'source' using http.extraheader (preferred)
           if git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main; then
             echo "Pushed version bump from source successfully."
             exit 0
@@ -187,17 +187,21 @@ jobs:
           MAX_ATTEMPTS=3
           ATTEMPT=1
 
+          # Build a token-authenticated clone URL (will be masked by Actions)
+          CLONE_URL="https://x-access-token:${PAT}@github.com/${REPO}.git"
+
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             TMPDIR="$(mktemp -d)"
             echo "Retry attempt ${ATTEMPT}: cloning ${REPO} into ${TMPDIR}"
-            # Clone with PAT using extraheader
-            git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" clone --depth=1 --branch main "https://github.com/${REPO}.git" "${TMPDIR}" || {
+
+            # Use token-authenticated clone URL so clone/push don't prompt for credentials
+            if ! git clone --depth=1 --branch main "${CLONE_URL}" "${TMPDIR}"; then
               echo "Clone failed on attempt ${ATTEMPT}"
               rm -rf "${TMPDIR}"
               ATTEMPT=$((ATTEMPT+1))
               sleep 1
               continue
-            }
+            fi
 
             cd "${TMPDIR}"
 
@@ -239,7 +243,8 @@ jobs:
             fi
 
             echo "Attempting push from recloned workspace..."
-            if git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main; then
+            # push will use the token-authenticated remote URL
+            if git push origin HEAD:main; then
               echo "Push succeeded from recloned workspace on attempt ${ATTEMPT}."
               # update original checked-out workspace to match origin/main
               if [ -d "$GITHUB_WORKSPACE/source" ]; then
