@@ -1,5 +1,9 @@
 name: 🚀 Cross-Repo Android Release Pipeline (Zonic)
 
+concurrency:
+  group: zonic-release-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
@@ -71,34 +75,98 @@ jobs:
           printf 'RELEASE_STORE_PASSWORD=%s\n' "${{ secrets.RELEASE_STORE_PASSWORD }}" >> source/gradle.properties
           printf 'RELEASE_KEY_PASSWORD=%s\n' "${{ secrets.RELEASE_KEY_PASSWORD }}" >> source/gradle.properties
 
-      - name: 🔍 Bump version (fast, shell)
+      - name: 🔍 Bump version (fresh clone + retry on remote change)
         id: get-version
         env:
           BUMP: ${{ github.event.inputs.bump }}
+          PAT: ${{ secrets.PAT }}
         run: |
           set -euo pipefail
           BUMP="${BUMP:-patch}"
-          if [ ! -f source/version.properties ]; then
-            printf 'versionName=0.0.0\nversionCode=0\n' > source/version.properties
-          fi
-          CURRENT_NAME=$(awk -F= '/^versionName/ {print $2; exit}' source/version.properties | tr -d '\r' || true)
-          CURRENT_CODE=$(awk -F= '/^versionCode/ {print $2; exit}' source/version.properties | tr -d '\r' || true)
-          CURRENT_NAME=${CURRENT_NAME:-0.0.0}
-          CURRENT_CODE=${CURRENT_CODE:-0}
-          MA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $1}' | grep -oE '^[0-9]+' || echo 0)
-          MI=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $2}' | grep -oE '^[0-9]+' || echo 0)
-          PA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $3}' | grep -oE '^[0-9]+' || echo 0)
-          MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
-          case "$BUMP" in
-            major) MA=$((MA + 1)); MI=0; PA=0 ;;
-            minor) MI=$((MI + 1)); PA=0 ;;
-            *)     PA=$((PA + 1)) ;;
-          esac
-          NEW_VERSION="${MA}.${MI}.${PA}"
-          NEW_CODE=$((CURRENT_CODE + 1))
-          printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > source/version.properties
-          echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+          REPO="${{ env.SOURCE_REPO }}"
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Attempt #${ATTEMPT} to bump version (fresh clone)..."
+
+            TMPDIR="$(mktemp -d)"
+            echo "Cloning ${REPO} into ${TMPDIR}"
+            git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" clone --depth=1 --branch main "https://github.com/${REPO}.git" "${TMPDIR}"
+
+            cd "${TMPDIR}"
+
+            # ensure version.properties exists
+            if [ ! -f version.properties ]; then
+              printf 'versionName=0.0.0\nversionCode=0\n' > version.properties
+            fi
+
+            # read current version
+            CURRENT_NAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            CURRENT_CODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            CURRENT_NAME=${CURRENT_NAME:-0.0.0}
+            CURRENT_CODE=${CURRENT_CODE:-0}
+
+            MA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $1}' | grep -oE '^[0-9]+' || echo 0)
+            MI=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $2}' | grep -oE '^[0-9]+' || echo 0)
+            PA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $3}' | grep -oE '^[0-9]+' || echo 0)
+            MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
+
+            case "$BUMP" in
+              major) MA=$((MA + 1)); MI=0; PA=0 ;;
+              minor) MI=$((MI + 1)); PA=0 ;;
+              *)     PA=$((PA + 1)) ;;
+            esac
+
+            NEW_VERSION="${MA}.${MI}.${PA}"
+            NEW_CODE=$((CURRENT_CODE + 1))
+
+            printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > version.properties
+
+            # commit & push using PAT auth via http.extraheader
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add version.properties || true
+
+            # If nothing changed (very unlikely) just set outputs and update original checkout
+            if git diff --staged --quiet; then
+              echo "No change to version.properties; using current values"
+              echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+              echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+              # update the checked-out source to match remote
+              git -C "$GITHUB_WORKSPACE/source" fetch origin main
+              git -C "$GITHUB_WORKSPACE/source" reset --hard origin/main || true
+              rm -rf "${TMPDIR}"
+              exit 0
+            fi
+
+            git commit -m "🔄 Auto-bump version to v${NEW_VERSION} [skip zonic]" || true
+
+            # attempt push
+            if git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main; then
+              echo "Push succeeded on attempt ${ATTEMPT}"
+              # export outputs for later steps
+              echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+              echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+
+              # update the previously checked-out workspace so later steps see the new version
+              if [ -d "$GITHUB_WORKSPACE/source" ]; then
+                git -C "$GITHUB_WORKSPACE/source" fetch origin main
+                git -C "$GITHUB_WORKSPACE/source" reset --hard origin/main || true
+              fi
+
+              rm -rf "${TMPDIR}"
+              exit 0
+            else
+              echo "Push failed on attempt ${ATTEMPT} — remote likely advanced. Retrying..."
+              rm -rf "${TMPDIR}"
+              ATTEMPT=$((ATTEMPT + 1))
+              sleep 1
+            fi
+          done
+
+          echo "Failed to push version bump after ${MAX_ATTEMPTS} attempts." >&2
+          exit 1
 
       - name: 🧹 Clean & Build Release
         id: build
@@ -154,16 +222,21 @@ jobs:
             gh release create "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" -t "${TITLE}" -n "${BODY}"
           fi
 
-      - name: 📝 Commit Version Bump back to source repo (push with PAT)
+      - name: 📝 Commit Version Bump back to source repo (safety - no-op if already pushed)
         if: always()
         env:
           PAT: ${{ secrets.PAT }}
         run: |
           set -euo pipefail
+          # This step is primarily defensive: the earlier step pushes directly from a fresh clone and also
+          # updated the checked-out 'source' workspace. Here we ensure any local changes are pushed if present.
           cd source
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.properties || true
-          # include a skip marker so external webhooks can ignore this automated commit
-          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip zonic]" || echo "No version change to commit"
+          if git diff --staged --quiet; then
+            echo "No local changes to commit in 'source'."
+            exit 0
+          fi
+          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip zonic]" || true
           git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main || echo "Push failed (check PAT permissions or branch name)"
