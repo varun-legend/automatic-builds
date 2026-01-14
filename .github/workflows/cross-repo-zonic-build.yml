@@ -47,6 +47,19 @@ jobs:
           fetch-depth: 0
           path: source
 
+      - name: ⚡ Cache Gradle (source)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            source/.gradle
+            source/.gradle/caches
+            source/.gradle/wrapper
+          key: gradle-cache-${{ runner.os }}-source-${{ hashFiles('source/**/build.gradle*', 'source/**/settings.gradle*', 'source/gradle.properties') }}
+          restore-keys: |
+            gradle-cache-${{ runner.os }}-source-
+
       - name: 🔧 Setup Temurin JDK 17
         uses: actions/setup-java@v5
         with:
@@ -84,7 +97,6 @@ jobs:
           BUMP="${BUMP:-patch}"
           cd source
 
-          # ensure version.properties exists
           if [ ! -f version.properties ]; then
             printf 'versionName=0.0.0\nversionCode=0\n' > version.properties
           fi
@@ -110,7 +122,6 @@ jobs:
 
           printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > version.properties
 
-          # expose outputs for other steps (initial values)
           echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
 
@@ -119,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           cd source
-          ./gradlew clean assembleRelease --no-daemon --parallel --configure-on-demand
+          ./gradlew clean assembleRelease --no-daemon --parallel --configure-on-demand -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.workers.max=4
           echo "built=release" >> "$GITHUB_OUTPUT"
 
       - name: 🔎 Find Release APK and rename to exact name (inside source)
@@ -165,10 +176,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # stage the version file
           git add version.properties || true
 
-          # nothing to commit -> set outputs from current file and exit
           if git diff --staged --quiet; then
             echo "No changes to commit in 'source'. Reading current version.properties to set outputs."
             VNAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
@@ -180,13 +189,10 @@ jobs:
             exit 0
           fi
 
-          # commit with skip marker
           git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip zonic]" || true
 
-          # try push directly from 'source' using http.extraheader (preferred)
           if git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main; then
             echo "Pushed version bump from source successfully."
-            # read actual committed file to make sure outputs reflect exact values
             VNAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
             VCODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
             VNAME=${VNAME:-${{ steps.get-version.outputs.version_name }}}
@@ -201,14 +207,12 @@ jobs:
           MAX_ATTEMPTS=3
           ATTEMPT=1
 
-          # Build a token-authenticated clone URL (will be masked by Actions)
           CLONE_URL="https://x-access-token:${PAT}@github.com/${REPO}.git"
 
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             TMPDIR="$(mktemp -d)"
             echo "Retry attempt ${ATTEMPT}: cloning ${REPO} into ${TMPDIR}"
 
-            # Use token-authenticated clone URL so clone/push don't prompt for credentials
             if ! git clone --depth=1 --branch main "${CLONE_URL}" "${TMPDIR}"; then
               echo "Clone failed on attempt ${ATTEMPT}"
               rm -rf "${TMPDIR}"
@@ -219,12 +223,10 @@ jobs:
 
             cd "${TMPDIR}"
 
-            # ensure version.properties exists here too
             if [ ! -f version.properties ]; then
               printf 'versionName=0.0.0\nversionCode=0\n' > version.properties
             fi
 
-            # re-compute bump based on freshly cloned repo
             CURRENT_NAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
             CURRENT_CODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
             CURRENT_NAME=${CURRENT_NAME:-0.0.0}
@@ -257,15 +259,12 @@ jobs:
             fi
 
             echo "Attempting push from recloned workspace..."
-            # push will use the token-authenticated remote URL
             if git push origin HEAD:main; then
               echo "Push succeeded from recloned workspace on attempt ${ATTEMPT}."
-              # update original checked-out workspace to match origin/main
               if [ -d "$GITHUB_WORKSPACE/source" ]; then
                 git -C "$GITHUB_WORKSPACE/source" fetch origin main
                 git -C "$GITHUB_WORKSPACE/source" reset --hard origin/main || true
               fi
-              # update outputs to the final bumped values
               echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
               echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
               rm -rf "${TMPDIR}"
