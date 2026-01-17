@@ -1,0 +1,298 @@
+name: 🚀 Cross-Repo Android Release Pipeline (Echo)
+
+concurrency:
+  group: echo-release-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  repository_dispatch:
+    types: [echo]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which part to bump (patch | minor | major)'
+        required: false
+        default: 'patch'
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_REPO: "varun-legend/echo"
+
+jobs:
+  build-and-publish:
+    name: Build • Assemble • Distribute
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_KEY_ALIAS:      ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+      RELEASE_KEY_PASSWORD:   ${{ secrets.RELEASE_KEY_PASSWORD }}
+      PAT:                    ${{ secrets.PAT2 }}
+    steps:
+      - name: 🧾 Checkout this repo (broker) metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 📁 Checkout source repo (echo)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.PAT2 }}
+          fetch-depth: 0
+          path: source
+
+      - name: ⚡ Cache Gradle (source)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            source/.gradle
+            source/.gradle/caches
+            source/.gradle/wrapper
+          key: gradle-cache-${{ runner.os }}-source-${{ hashFiles('source/**/build.gradle*', 'source/**/settings.gradle*', 'source/gradle.properties') }}
+          restore-keys: |
+            gradle-cache-${{ runner.os }}-source-
+
+      - name: 🔧 Setup Temurin JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: 📥 Ensure gradlew executable
+        run: chmod +x ./source/gradlew
+
+      - name: 🔐 Restore keystore + append signing props (into source)
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.RELEASE_STORE_FILE }}" ]; then
+            echo "ERROR: RELEASE_STORE_FILE secret not set"
+            exit 1
+          fi
+          printf '%s' "${{ secrets.RELEASE_STORE_FILE }}" | base64 --decode > "$GITHUB_WORKSPACE/source/varun-release-key.p12"
+          chmod 600 "$GITHUB_WORKSPACE/source/varun-release-key.p12"
+          if [ -f source/gradle.properties ]; then
+            grep -vE '^(RELEASE_STORE_FILE|RELEASE_KEY_ALIAS|RELEASE_STORE_PASSWORD|RELEASE_KEY_PASSWORD)=' source/gradle.properties > source/gradle.properties.tmp || true
+            mv source/gradle.properties.tmp source/gradle.properties || true
+          fi
+          printf 'RELEASE_STORE_FILE=varun-release-key.p12\n' >> source/gradle.properties
+          printf 'RELEASE_KEY_ALIAS=%s\n' "${{ secrets.RELEASE_KEY_ALIAS }}" >> source/gradle.properties
+          printf 'RELEASE_STORE_PASSWORD=%s\n' "${{ secrets.RELEASE_STORE_PASSWORD }}" >> source/gradle.properties
+          printf 'RELEASE_KEY_PASSWORD=%s\n' "${{ secrets.RELEASE_KEY_PASSWORD }}" >> source/gradle.properties
+
+      - name: 🔍 Bump version (in-place, no reclone)
+        id: get-version
+        env:
+          BUMP: ${{ github.event.inputs.bump }}
+        run: |
+          set -euo pipefail
+          BUMP="${BUMP:-patch}"
+          cd source
+
+          if [ ! -f version.properties ]; then
+            printf 'versionName=0.0.0\nversionCode=0\n' > version.properties
+          fi
+
+          CURRENT_NAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
+          CURRENT_CODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
+          CURRENT_NAME=${CURRENT_NAME:-0.0.0}
+          CURRENT_CODE=${CURRENT_CODE:-0}
+
+          MA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $1}' | grep -oE '^[0-9]+' || echo 0)
+          MI=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $2}' | grep -oE '^[0-9]+' || echo 0)
+          PA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $3}' | grep -oE '^[0-9]+' || echo 0)
+          MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
+
+          case "$BUMP" in
+            major) MA=$((MA + 1)); MI=0; PA=0 ;;
+            minor) MI=$((MI + 1)); PA=0 ;;
+            *)     PA=$((PA + 1)) ;;
+          esac
+
+          NEW_VERSION="${MA}.${MI}.${PA}"
+          NEW_CODE=$((CURRENT_CODE + 1))
+
+          printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > version.properties
+
+          echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+
+      - name: 🧹 Clean & Build Release
+        id: build
+        run: |
+          set -euo pipefail
+          cd source
+          ./gradlew clean assembleRelease --no-daemon --parallel --configure-on-demand -Dorg.gradle.caching=true -Dorg.gradle.parallel=true -Dorg.gradle.workers.max=4
+          echo "built=release" >> "$GITHUB_OUTPUT"
+
+      - name: 🔎 Find Release APK and rename to exact name (inside source)
+        id: find-apk
+        run: |
+          set -euo pipefail
+          APK=$(find source/app/build/outputs -type f -name "*release*.apk" | head -n 1 || true)
+          if [ -z "$APK" ]; then
+            APK=$(find source/app/build/outputs -type f -name "*.apk" | head -n 1 || true)
+          fi
+          if [ -z "$APK" ]; then
+            echo "No APK found — continuing without APK."
+            echo "apk_name=" >> $GITHUB_OUTPUT
+            echo "apk_path=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          TARGET_NAME="Echo-v${{ steps.get-version.outputs.version_name }}.apk"
+          TARGET_DIR="$(dirname "$APK")"
+          TARGET_PATH="$TARGET_DIR/$TARGET_NAME"
+          mv "$APK" "$TARGET_PATH"
+          echo "apk_name=$TARGET_NAME" >> $GITHUB_OUTPUT
+          echo "apk_path=$TARGET_PATH" >> $GITHUB_OUTPUT
+
+      - name: ⚙️ Ensure gh CLI
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt update -y
+            sudo apt install -y gh
+          fi
+
+      - name: 📝 Commit Version Bump back to source repo (push from source; reclone & retry only on failure)
+        id: commit-bump
+        if: always()
+        env:
+          PAT: ${{ secrets.PAT2 }}
+          BUMP: ${{ github.event.inputs.bump }}
+          REPO: ${{ env.SOURCE_REPO }}
+        run: |
+          set -euo pipefail
+          cd source
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add version.properties || true
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit in 'source'. Reading current version.properties to set outputs."
+            VNAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            VCODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            VNAME=${VNAME:-${{ steps.get-version.outputs.version_name }}}
+            VCODE=${VCODE:-${{ steps.get-version.outputs.version_code }}}
+            echo "version_name=${VNAME}" >> "$GITHUB_OUTPUT"
+            echo "version_code=${VCODE}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip echo]" || true
+
+          if git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main; then
+            echo "Pushed version bump from source successfully."
+            VNAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            VCODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            VNAME=${VNAME:-${{ steps.get-version.outputs.version_name }}}
+            VCODE=${VCODE:-${{ steps.get-version.outputs.version_code }}}
+            echo "version_name=${VNAME}" >> "$GITHUB_OUTPUT"
+            echo "version_code=${VCODE}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Initial push from 'source' failed (remote likely advanced). Attempting reclone-retry up to 3 times."
+
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+
+          CLONE_URL="https://x-access-token:${PAT}@github.com/${REPO}.git"
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            TMPDIR="$(mktemp -d)"
+            echo "Retry attempt ${ATTEMPT}: cloning ${REPO} into ${TMPDIR}"
+
+            if ! git clone --depth=1 --branch main "${CLONE_URL}" "${TMPDIR}"; then
+              echo "Clone failed on attempt ${ATTEMPT}"
+              rm -rf "${TMPDIR}"
+              ATTEMPT=$((ATTEMPT+1))
+              sleep 1
+              continue
+            fi
+
+            cd "${TMPDIR}"
+
+            if [ ! -f version.properties ]; then
+              printf 'versionName=0.0.0\nversionCode=0\n' > version.properties
+            fi
+
+            CURRENT_NAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            CURRENT_CODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
+            CURRENT_NAME=${CURRENT_NAME:-0.0.0}
+            CURRENT_CODE=${CURRENT_CODE:-0}
+
+            MA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $1}' | grep -oE '^[0-9]+' || echo 0)
+            MI=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $2}' | grep -oE '^[0-9]+' || echo 0)
+            PA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $3}' | grep -oE '^[0-9]+' || echo 0)
+            MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
+
+            case "${BUMP:-patch}" in
+              major) MA=$((MA + 1)); MI=0; PA=0 ;;
+              minor) MI=$((MI + 1)); PA=0 ;;
+              *)     PA=$((PA + 1)) ;;
+            esac
+
+            NEW_VERSION="${MA}.${MI}.${PA}"
+            NEW_CODE=$((CURRENT_CODE + 1))
+
+            printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > version.properties
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add version.properties || true
+
+            if git diff --staged --quiet; then
+              echo "No change to version.properties in recloned repo (unexpected)."
+            else
+              git commit -m "🔄 Auto-bump version to v${NEW_VERSION} [skip echo]" || true
+            fi
+
+            echo "Attempting push from recloned workspace..."
+            if git push origin HEAD:main; then
+              echo "Push succeeded from recloned workspace on attempt ${ATTEMPT}."
+              if [ -d "$GITHUB_WORKSPACE/source" ]; then
+                git -C "$GITHUB_WORKSPACE/source" fetch origin main
+                git -C "$GITHUB_WORKSPACE/source" reset --hard origin/main || true
+              fi
+              echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+              echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+              rm -rf "${TMPDIR}"
+              exit 0
+            else
+              echo "Push from recloned workspace failed on attempt ${ATTEMPT}."
+              rm -rf "${TMPDIR}"
+              ATTEMPT=$((ATTEMPT+1))
+              sleep 1
+            fi
+          done
+
+          echo "Failed to push version bump after ${MAX_ATTEMPTS} reclone attempts." >&2
+          exit 1
+
+      - name: 🧾 Create or upload GitHub Release in source repo & upload APK
+        if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
+        id: create_release
+        env:
+          GH_TOKEN: ${{ secrets.PAT2 }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.commit-bump.outputs.version_name }}"
+          TITLE="📦 Release ${TAG}"
+          BODY="Release ${TAG} (code ${{ steps.commit-bump.outputs.version_code }})"
+          APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
+          if gh release view "$TAG" --repo "${{ env.SOURCE_REPO }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" --clobber
+          else
+            gh release create "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" -t "${TITLE}" -n "${BODY}"
+          fi
