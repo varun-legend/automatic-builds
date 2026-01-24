@@ -119,7 +119,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.properties
-          git commit -m "ci: bump version to v${{ steps.get-version.outputs.version_name }}" || true
+          git commit -m "ci: bump version to v${{ steps.get-version.outputs.version_name }} [skip zonic]" || true
           git push "https://x-access-token:${{ secrets.PAT }}@github.com/${{ env.SOURCE_REPO }}.git" HEAD:${{ github.ref_name }} || true
 
       - name: 🧹 Clean & Build Release
