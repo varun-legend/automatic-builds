@@ -50,8 +50,6 @@ jobs:
             source/.gradle/caches
             source/.gradle/wrapper
           key: gradle-cache-${{ runner.os }}-${{ env.SOURCE_REPO }}-${{ hashFiles('source/**/build.gradle*', 'source/**/settings.gradle*', 'source/gradle.properties') }}
-          restore-keys: |
-            gradle-cache-${{ runner.os }}-${{ env.SOURCE_REPO }}-
 
       - name: 🔧 Setup Temurin JDK 17
         uses: actions/setup-java@v5
@@ -112,6 +110,17 @@ jobs:
           printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > version.properties
           echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
+
+      - name: 📝 Bump and push version.properties (commit back to source)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -euo pipefail
+          cd source
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.properties
+          git commit -m "ci: bump version to v${{ steps.get-version.outputs.version_name }}" || true
+          git push "https://x-access-token:${{ secrets.PAT }}@github.com/${{ env.SOURCE_REPO }}.git" HEAD:${{ github.ref_name }} || true
 
       - name: 🧹 Clean & Build Release
         id: build
@@ -175,9 +184,9 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
           set -euo pipefail
-          TAG="v${{ steps.commit-bump.outputs.version_name }}"
+          TAG="v${{ steps.get-version.outputs.version_name }}"
           TITLE="📦 Release ${TAG}"
-          BODY="Release ${TAG} (code ${{ steps.commit-bump.outputs.version_code }})"
+          BODY="Release ${TAG} (code ${{ steps.get-version.outputs.version_code }})"
           APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
           if gh release view "$TAG" --repo "${{ env.SOURCE_REPO }}" >/dev/null 2>&1; then
             gh release upload "$TAG" "$APK_PATH" --repo "${{ env.SOURCE_REPO }}" --clobber
