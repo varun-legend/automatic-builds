@@ -84,7 +84,7 @@ jobs:
           printf 'RELEASE_STORE_PASSWORD=%s\n' "${{ secrets.RELEASE_STORE_PASSWORD }}" >> source/gradle.properties
           printf 'RELEASE_KEY_PASSWORD=%s\n' "${{ secrets.RELEASE_KEY_PASSWORD }}" >> source/gradle.properties
 
-      - name: 🔍 Bump version (in-place, no reclone)
+      - name: 🔍 Bump version (in-place, no reclone) — compute & write version.properties
         id: get-version
         env:
           BUMP: ${{ github.event.inputs.bump }}
@@ -151,93 +151,25 @@ jobs:
             sudo apt install -y gh
           fi
 
-      - name: 📝 Commit Version Bump back to source repo (push from source; reclone & retry only on failure)
+      - name: 📝 Prepare version outputs (NO PUSH — intentionally)
         id: commit-bump
         if: always()
-        env:
-          PAT: ${{ secrets.PAT2 }}
-          BUMP: ${{ github.event.inputs.bump }}
-          REPO: ${{ env.SOURCE_REPO }}
         run: |
           set -euo pipefail
-          cd source
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.properties || true
-          if git diff --staged --quiet; then
+          cd source || exit 0
+          # read the version.properties that the bump step wrote (fallback to step output if file missing)
+          if [ -f version.properties ]; then
             VNAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
             VCODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
-            VNAME=${VNAME:-${{ steps.get-version.outputs.version_name }}}
-            VCODE=${VCODE:-${{ steps.get-version.outputs.version_code }}}
-            echo "version_name=${VNAME}" >> "$GITHUB_OUTPUT"
-            echo "version_code=${VCODE}" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            VNAME="${{ steps.get-version.outputs.version_name }}"
+            VCODE="${{ steps.get-version.outputs.version_code }}"
           fi
-          git commit -m "🔄 Auto-bump version to v${{ steps.get-version.outputs.version_name }} [skip echo]" || true
-          if git -c http.extraheader="AUTHORIZATION: bearer ${PAT}" push origin HEAD:main; then
-            VNAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
-            VCODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
-            VNAME=${VNAME:-${{ steps.get-version.outputs.version_name }}}
-            VCODE=${VCODE:-${{ steps.get-version.outputs.version_code }}}
-            echo "version_name=${VNAME}" >> "$GITHUB_OUTPUT"
-            echo "version_code=${VCODE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          MAX_ATTEMPTS=3
-          ATTEMPT=1
-          CLONE_URL="https://x-access-token:${PAT}@github.com/${REPO}.git"
-          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            TMPDIR="$(mktemp -d)"
-            if ! git clone --depth=1 --branch main "${CLONE_URL}" "${TMPDIR}"; then
-              rm -rf "${TMPDIR}"
-              ATTEMPT=$((ATTEMPT+1))
-              sleep 1
-              continue
-            fi
-            cd "${TMPDIR}"
-            if [ ! -f version.properties ]; then
-              printf 'versionName=0.0.0\nversionCode=0\n' > version.properties
-            fi
-            CURRENT_NAME=$(awk -F= '/^versionName/ {print $2; exit}' version.properties | tr -d '\r' || true)
-            CURRENT_CODE=$(awk -F= '/^versionCode/ {print $2; exit}' version.properties | tr -d '\r' || true)
-            CURRENT_NAME=${CURRENT_NAME:-0.0.0}
-            CURRENT_CODE=${CURRENT_CODE:-0}
-            MA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $1}' | grep -oE '^[0-9]+' || echo 0)
-            MI=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $2}' | grep -oE '^[0-9]+' || echo 0)
-            PA=$(printf '%s' "$CURRENT_NAME" | awk -F. '{print $3}' | grep -oE '^[0-9]+' || echo 0)
-            MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
-            case "${BUMP:-patch}" in
-              major) MA=$((MA + 1)); MI=0; PA=0 ;;
-              minor) MI=$((MI + 1)); PA=0 ;;
-              *)     PA=$((PA + 1)) ;;
-            esac
-            NEW_VERSION="${MA}.${MI}.${PA}"
-            NEW_CODE=$((CURRENT_CODE + 1))
-            printf 'versionName=%s\nversionCode=%s\n' "$NEW_VERSION" "$NEW_CODE" > version.properties
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add version.properties || true
-            if git diff --staged --quiet; then
-              :
-            else
-              git commit -m "🔄 Auto-bump version to v${NEW_VERSION} [skip echo]" || true
-            fi
-            if git push origin HEAD:main; then
-              if [ -d "$GITHUB_WORKSPACE/source" ]; then
-                git -C "$GITHUB_WORKSPACE/source" fetch origin main
-                git -C "$GITHUB_WORKSPACE/source" reset --hard origin/main || true
-              fi
-              echo "version_name=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-              echo "version_code=${NEW_CODE}" >> "$GITHUB_OUTPUT"
-              rm -rf "${TMPDIR}"
-              exit 0
-            else
-              rm -rf "${TMPDIR}"
-              ATTEMPT=$((ATTEMPT+1))
-              sleep 1
-            fi
-          done
-          exit 1
+          VNAME=${VNAME:-${{ steps.get-version.outputs.version_name }}}
+          VCODE=${VCODE:-${{ steps.get-version.outputs.version_code }}}
+          # Expose outputs for downstream steps. NOTE: This step does NOT push or modify remote repo.
+          echo "version_name=${VNAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VCODE}" >> "$GITHUB_OUTPUT"
 
       - name: 🧾 Create or upload GitHub Release in source repo & upload APK
         if: ${{ github.event_name != 'pull_request' && steps.find-apk.outputs.apk_path != '' }}
